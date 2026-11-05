@@ -503,6 +503,9 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 								if crate::gql::feed_route(&path).is_some() {
 									return crate::gql::feed(&path).await;
 								}
+								if let Some(name) = crate::gql::user_profile_name(&path) {
+									return crate::gql::user_profile(name).await;
+								}
 							}
 							error!("Got an invalid response from reddit {e}. Status code: {status}");
 							if status.is_server_error() {
@@ -652,6 +655,8 @@ mod tests {
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_rate_limit_check() {
+		// Earlier live tests may already have consumed the shared token.
+		force_refresh_token().await;
 		rate_limit_check().await.unwrap();
 	}
 

@@ -594,6 +594,30 @@ fn connection_listing(connection: &Value) -> Result<Value, String> {
 	Ok(result)
 }
 
+pub(crate) fn user_profile_name(path: &str) -> Option<&str> {
+	let name = path.split('?').next()?.strip_prefix("/user/")?.strip_suffix("/about.json")?;
+	(!name.is_empty() && !name.contains('/')).then_some(name)
+}
+
+pub(crate) async fn user_profile(name: &str) -> Result<Value, String> {
+	let response = query(&json_value!({
+		"operationName": "UserProfile", "variables": {"name": name, "includePremiumAvatarTreatment": false},
+		"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "a05c628c5469c6b107c85988a8b1d0b79a2e7b6150ebd3a449c67e226e975ddc"}}
+	}))
+	.await?;
+	let user = &response["data"]["redditorInfoByName"];
+	if user["__typename"] != "Redditor" {
+		return Err(format!("User {name} not found"));
+	}
+	let profile = &user["profile"];
+	Ok(json_value!({"kind": "t2", "data": {
+		"name": user["name"], "created": timestamp(&profile["createdAt"]).unwrap_or_default(),
+		"total_karma": user["karma"]["total"],
+		"subreddit": {"title": profile["title"], "icon_img": profile["styles"]["icon"],
+			"banner_img": profile["styles"]["profileBanner"], "public_description": profile["publicDescriptionText"], "over_18": profile["isNsfw"]}
+	}}))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
