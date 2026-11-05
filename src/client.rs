@@ -499,6 +499,11 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 							}
 						}
 						Err(e) => {
+							if status.as_u16() == 403 {
+								if crate::gql::feed_route(&path).is_some() {
+									return crate::gql::feed(&path).await;
+								}
+							}
 							error!("Got an invalid response from reddit {e}. Status code: {status}");
 							if status.is_server_error() {
 								Err("Reddit is having issues, check if there's an outage".to_string())

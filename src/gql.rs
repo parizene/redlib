@@ -427,6 +427,173 @@ fn table(node: &Value, media: &Value) -> String {
 	out + "</tbody></table>"
 }
 
+// Listing/profile operation definitions follow the verified November app queries.
+// https://github.com/YadominJinta/redlib/commit/9d9d16b3700badf50a328c729f549d337624e722
+fn post_item(node: &Value) -> Value {
+	let fullname = node["id"].as_str().unwrap_or_default();
+	let content = &node["content"];
+	let richtext: Value = content["richtext"].as_str().and_then(|r| serde_json::from_str(r).ok()).unwrap_or_default();
+	let body = if richtext["document"].is_array() {
+		render(&richtext["document"], &content["richtextMedia"])
+	} else {
+		format!("<p>{}</p>", htmlescape::encode_minimal(content["markdown"].as_str().unwrap_or_default()))
+	};
+	let flair = &node["flair"];
+	let mut post = json_value!({"kind": "t3", "data": {
+			"id": fullname.strip_prefix("t3_").unwrap_or(fullname), "name": fullname,
+			"title": node["postTitle"], "author": node["authorInfo"]["name"].as_str().unwrap_or("[deleted]"),
+			"subreddit": node["subreddit"]["name"], "permalink": node["permalink"],
+			"created_utc": timestamp(&node["createdAt"]).unwrap_or_default(),
+			"score": node["score"], "upvote_ratio": node["upvoteRatio"], "num_comments": node["commentCount"],
+			"selftext": content["markdown"], "selftext_html": body,
+			"is_self": node["isSelfPost"], "over_18": node["isNsfw"], "spoiler": node["isSpoiler"],
+			"stickied": node["isStickied"], "locked": node["isLocked"], "domain": node["domain"],
+			"url": node["url"], "url_overridden_by_dest": node["url"], "post_hint": node["postHint"],
+			"suggested_sort": node["suggestedCommentSort"].as_str().map(str::to_lowercase),
+			"removed_by_category": node["removedByCategory"].as_str().map(str::to_lowercase),
+			"distinguished": node["distinguishedAs"].as_str().map(str::to_lowercase),
+			"link_flair_type": "text", "link_flair_text": flair["text"],
+			"link_flair_background_color": flair["template"]["backgroundColor"],
+			"link_flair_text_color": flair["textColor"].as_str().map(str::to_lowercase),
+			"thumbnail": node["thumbnail"]["url"],
+			"thumbnail_width": node["thumbnail"]["dimensions"]["width"],
+			"thumbnail_height": node["thumbnail"]["dimensions"]["height"]
+	}});
+	if let Some(items) = node["gallery"]["items"].as_array().filter(|items| !items.is_empty()) {
+		let mut gallery = Vec::new();
+		let mut metadata = serde_json::Map::new();
+		for item in items {
+			let media = &item["media"];
+			let Some(id) = media["id"].as_str() else { continue };
+			let url = media["url"].as_str().or_else(|| media["xxxlarge"]["url"].as_str()).unwrap_or_default();
+			gallery.push(json_value!({"media_id": id, "caption": item["caption"], "outbound_url": item["outboundUrl"]}));
+			metadata.insert(
+				id.into(),
+				json_value!({"m": media["mimetype"], "s": {
+						"u": url, "gif": url, "x": media["width"], "y": media["height"]
+				}}),
+			);
+		}
+		post["data"]["is_gallery"] = true.into();
+		post["data"]["gallery_data"] = json_value!({"items": gallery});
+		post["data"]["media_metadata"] = metadata.into();
+	}
+	let source = &node["media"]["still"]["source"];
+	if source["url"].is_string() {
+		post["data"]["preview"] = json_value!({"images": [{"source": {
+				"url": source["url"], "width": source["dimensions"]["width"], "height": source["dimensions"]["height"]
+		}}]});
+	}
+	let streaming = &node["media"]["streaming"];
+	if streaming["hlsUrl"].is_string() {
+		let fallback = node["media"]["packagedMedia"]["muxedMp4s"]["highest"]["url"]
+			.as_str()
+			.or_else(|| node["media"]["download"]["url"].as_str())
+			.or_else(|| streaming["scrubberMediaUrl"].as_str())
+			.unwrap_or_default();
+		post["data"]["secure_media"] = json_value!({"reddit_video": {
+				"hls_url": streaming["hlsUrl"], "fallback_url": fallback, "is_gif": streaming["isGif"],
+				"width": streaming["dimensions"]["width"], "height": streaming["dimensions"]["height"]
+		}});
+	}
+	post
+}
+
+pub(crate) fn feed_route(path: &str) -> Option<(&str, &str)> {
+	let path = path.split('?').next()?.strip_prefix("/r/")?;
+	let (subreddit, sort) = path.split_once('/')?;
+	let sort = sort.strip_suffix(".json")?;
+	if subreddit.is_empty() || !matches!(sort, "hot" | "new" | "top" | "rising" | "controversial") {
+		return None;
+	}
+	Some((subreddit, sort))
+}
+
+pub(crate) async fn feed(path: &str) -> Result<Value, String> {
+	let (subreddit, sort) = feed_route(path).ok_or("Unsupported feed path")?;
+	let mut variables = json_value!({
+		"subredditName": subreddit, "sort": sort.to_uppercase(), "includeSubredditInPosts": true,
+		"pageSize": param(path, "limit").and_then(|v| v.parse::<u32>().ok()).unwrap_or(25).clamp(1, 100)
+	});
+	if let Some(after) = param(path, "after") {
+		variables["after"] = after.into();
+	}
+	if let Some(range) = param(path, "t") {
+		variables["range"] = range.to_uppercase().into();
+	}
+	if subreddit.eq_ignore_ascii_case("all") {
+		variables["time"] = param(path, "t").unwrap_or_else(|| "all".into()).to_uppercase().into();
+		let response = query(&json_value!({
+				"operationName": "AllFeedSdui", "variables": variables,
+				"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "c2c71fa2d5160cc89193d8d93b973eb2d4ce943ea35139f3d31a07676e6fe822"}}
+		}))
+		.await?;
+		let connection = &response["data"]["allV3"]["elements"];
+		let edges = connection["edges"].as_array().ok_or("Reddit returned no All feed")?;
+		let mut ids = Vec::new();
+		for edge in edges {
+			if let Some(id) = edge["node"]["groupId"].as_str().filter(|id| id.starts_with("t3_")) {
+				if !ids.contains(&id) {
+					ids.push(id);
+				}
+			}
+		}
+		let mut result = if ids.is_empty() {
+			listing(Vec::new())
+		} else {
+			let posts = query(&json_value!({
+					"operationName": "PostsByIds", "variables": {"ids": ids, "includePostContentPostHint": true, "includePostContentThumbnailEnabled": true},
+					"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "0e471495bcba33554b6c540b3cf1cae23dd5432a8b741dddc7fd6717dc2520a7"}}
+			}))
+			.await?;
+			listing(
+				posts["data"]["postsInfoByIds"]
+					.as_array()
+					.ok_or("Reddit returned no All posts")?
+					.iter()
+					.filter(|p| !p.is_null())
+					.map(post_item)
+					.collect(),
+			)
+		};
+		result["data"]["after"] = connection["pageInfo"]["endCursor"].clone();
+		return Ok(result);
+	}
+	if subreddit.eq_ignore_ascii_case("popular") {
+		let response = query(&json_value!({
+				"operationName": "PopularFeedElements", "variables": variables,
+				"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "728c0f9a4d12c17b8cffe07669bb1a8770b0f2ec0c84e040485f8fad2d9c417f"}}
+		}))
+		.await?;
+		let mut result = connection_listing(&response["data"]["popular"]["elements"])?;
+		result["data"]["geo_filter"] = "GLOBAL".into();
+		return Ok(result);
+	}
+	let response = query(&json_value!({
+		"operationName": "SubredditFeedElements", "variables": variables,
+		"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "97046e2a48050f10a507db354a8da60955ffccb586dcf63163bdfc6610d5cf7a"}}
+	}))
+	.await?;
+	connection_listing(&response["data"]["postFeed"]["elements"])
+}
+
+fn connection_listing(connection: &Value) -> Result<Value, String> {
+	let edges = connection["edges"].as_array().ok_or("Reddit returned no post listing")?;
+	let posts = edges
+		.iter()
+		.filter_map(|edge| {
+			let node = &edge["node"];
+			let node = if node["postInfo"].is_object() { &node["postInfo"] } else { node };
+			matches!(node["__typename"].as_str(), Some("SubredditPost" | "ProfilePost")).then(|| post_item(node))
+		})
+		.collect();
+	let mut result = listing(posts);
+	if connection["pageInfo"]["hasNextPage"] != false {
+		result["data"]["after"] = connection["pageInfo"]["endCursor"].clone();
+	}
+	Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
