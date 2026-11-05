@@ -74,19 +74,9 @@ impl Resolve for RedditDnsResolver {
 }
 
 pub fn build_client() -> WreqClient {
-	// Keeping this list short to aid in privacy.
-	// The more emulations, the more unique a fingerprint each instance has.
-	// But some emulations should increase evasiveness.
-	let emulation = [Profile::Chrome145, Profile::Firefox147];
-	let emulation_platform = [Platform::Android, Platform::Windows];
-
-	let rand = fastrand::usize(..);
-	let emulation = Emulation::builder()
-		.profile(emulation[rand % emulation.len()])
-		.platform(emulation_platform[rand % emulation_platform.len()])
-		.build();
-
-	info!("Building Wreq client with random emulation");
+	// Match the Android app identity; newer browser fingerprints are rejected.
+	let emulation = Emulation::builder().profile(Profile::OkHttp4_9).platform(Platform::Android).build();
+	info!("Building Wreq client with OkHttp 4.9 Android emulation");
 	WreqClient::builder()
 		.emulation(emulation)
 		.redirect(Policy::none())
