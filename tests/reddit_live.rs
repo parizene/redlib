@@ -51,3 +51,22 @@ async fn new_listing_pagination_returns_the_next_posts() {
 		"pagination returns different posts"
 	);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires live Reddit access"]
+async fn all_hot_next_page_accepts_an_empty_time_filter() {
+	let first = json("/r/all/hot.json?raw_json=1&limit=5".into(), false).await.expect("All Hot first page");
+	let after = first["data"]["after"].as_str().expect("All Hot next page cursor");
+	let query = url::form_urlencoded::Serializer::new(String::new())
+		.append_pair("sort", "hot")
+		.append_pair("t", "")
+		.append_pair("after", after)
+		.append_pair("raw_json", "1")
+		.append_pair("limit", "5")
+		.finish();
+	let next = json(format!("/r/all/hot.json?{query}"), false).await.expect("All Hot next page with no time filter");
+	let first_ids: Vec<_> = first["data"]["children"].as_array().unwrap().iter().map(|p| &p["data"]["id"]).collect();
+	let posts = next["data"]["children"].as_array().expect("next page posts");
+	assert!(!posts.is_empty());
+	assert!(posts.iter().any(|p| !first_ids.contains(&&p["data"]["id"])), "next page contains new posts");
+}

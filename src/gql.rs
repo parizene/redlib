@@ -518,11 +518,11 @@ pub(crate) async fn feed(path: &str) -> Result<Value, String> {
 	if let Some(after) = param(path, "after") {
 		variables["after"] = after.into();
 	}
-	if let Some(range) = param(path, "t") {
+	if let Some(range) = param(path, "t").filter(|range| !range.is_empty()) {
 		variables["range"] = range.to_uppercase().into();
 	}
 	if subreddit.eq_ignore_ascii_case("all") {
-		variables["time"] = param(path, "t").unwrap_or_else(|| "all".into()).to_uppercase().into();
+		variables["time"] = param(path, "t").filter(|range| !range.is_empty()).unwrap_or_else(|| "all".into()).to_uppercase().into();
 		let response = query(&json_value!({
 				"operationName": "AllFeedSdui", "variables": variables,
 				"extensions": {"persistedQuery": {"version": 1, "sha256Hash": "c2c71fa2d5160cc89193d8d93b973eb2d4ce943ea35139f3d31a07676e6fe822"}}
