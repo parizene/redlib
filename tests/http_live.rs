@@ -145,3 +145,42 @@ async fn long_threads_offer_the_next_page_of_comments() {
 		.unwrap();
 	assert_eq!(response.status(), 200, "the next page loads");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires live Reddit access"]
+async fn streamable_posts_offer_click_to_load_player() {
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let port = listener.local_addr().unwrap().port();
+	drop(listener);
+	let _app = App(
+		Command::new(env!("CARGO_BIN_EXE_redlib"))
+			.args(["--address", "127.0.0.1", "--port", &port.to_string()])
+			.env("REDLIB_DEFAULT_USE_HLS", "on")
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.spawn()
+			.unwrap(),
+	);
+	let client = Client::new();
+	let base = format!("http://127.0.0.1:{port}");
+	tokio::time::timeout(Duration::from_secs(45), async {
+		loop {
+			if client.get(format!("{base}/settings").parse().unwrap()).await.is_ok() {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.await
+	.expect("app starts");
+	let response = client.get(format!("{base}/r/nba/comments/1xp4sfp").parse().unwrap()).await.unwrap();
+	assert_eq!(response.status(), 200);
+	let html = String::from_utf8(to_bytes(response.into_body()).await.unwrap().to_vec()).unwrap();
+	assert!(
+		html.contains("data-streamable-src=\"https://streamable.com/o/eov65i\""),
+		"Streamable post offers an inline player"
+	);
+	assert!(html.contains("Play Streamable video"));
+	assert!(html.contains("https://streamable.com/eov65i"), "original link remains available");
+	assert!(!html.contains("<iframe"), "Streamable is not contacted before choosing Play");
+}

@@ -182,9 +182,24 @@ pub struct Media {
 	pub download_name: String,
 }
 
+// Build the supported embed URL only for Streamable video links, never arbitrary HTML.
+fn streamable_embed_url(value: &str) -> Option<String> {
+	let url = Url::parse(value).ok()?;
+	if !matches!(url.scheme(), "http" | "https") || !matches!(url.host_str(), Some("streamable.com" | "www.streamable.com")) {
+		return None;
+	}
+	let path = url.path().trim_matches('/');
+	let id = path.strip_prefix("e/").or_else(|| path.strip_prefix("o/")).unwrap_or(path);
+	if id.is_empty() || id.len() > 32 || !id.bytes().all(|c| c.is_ascii_alphanumeric()) {
+		return None;
+	}
+	Some(format!("https://streamable.com/o/{id}"))
+}
+
 impl Media {
 	pub async fn parse(data: &Value) -> (String, Self, Vec<GalleryMedia>) {
 		let mut gallery = Vec::new();
+		let streamable_embed = Value::String(streamable_embed_url(data["url"].as_str().unwrap_or_default()).unwrap_or_default());
 
 		// Define the various known places that Reddit might put video URLs.
 		let data_preview = &data["preview"]["reddit_video_preview"];
@@ -210,6 +225,8 @@ impl Media {
 				&crosspost_parent_media["fallback_url"],
 				Some(&crosspost_parent_media["hls_url"]),
 			)
+		} else if streamable_embed.as_str().is_some_and(|url| !url.is_empty()) {
+			("streamable", &data["url"], Some(&streamable_embed))
 		} else if data["post_hint"].as_str().unwrap_or("") == "image" {
 			// Handle images, whether GIFs or pics
 			let preview = &data["preview"]["images"][0];
